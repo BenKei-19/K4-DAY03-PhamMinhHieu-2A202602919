@@ -6,8 +6,11 @@ Hỗ trợ Native Tool Calling và chuyển đổi linh hoạt qua biến môi t
 import os
 import sys
 import json
+import re
 from typing import Dict, Any, List
 from dotenv import load_dotenv
+
+from tools import MOCK_DATABASE
 
 if sys.stdout.encoding != 'utf-8':
     try:
@@ -37,26 +40,50 @@ class MockOfflineProvider(BaseLLMProvider):
     def generate_with_tools(self, prompt: str, tools_schema: List[Dict[str, Any]], system_prompt: str = "") -> Dict[str, Any]:
         prompt_lower = prompt.lower()
         
-        # Mô phỏng nhận diện intent gọi Tool
-        if "sv2026001" in prompt_lower and "đặt lịch" in prompt_lower:
+        # Trích xuất mã sinh viên động (theo định dạng chuẩn SV + các chữ số)
+        match_sv = re.search(r'\b(SV\d+)\b', prompt, re.IGNORECASE)
+        student_id = match_sv.group(1).upper() if match_sv else None
+
+        # Trích xuất thời gian động nếu có (ví dụ: '14:00 ngày 15/09/2026' hoặc '09:00 ngày 20/09/2026')
+        match_time = re.search(r'(\d{1,2}:\d{2}(?:\s*(?:ngày|vào lúc)?\s*\d{1,2}/\d{1,2}/\d{4})?)', prompt, re.IGNORECASE)
+        datetime_str = match_time.group(1).strip() if match_time else "14:00 15/09/2026"
+
+        # Trích xuất tên cố vấn học tập nếu được đề cập trong câu hỏi hoặc tra cứu theo hồ sơ sinh viên
+        match_advisor = re.search(r'((?:PGS\.?\s*TS|TS|ThS|GS\.?\s*TS)\.?\s+[A-ZÀ-Ỹa-zà-ỹ\s]+?)(?:\s+vào|\.|\,|$)', prompt)
+        if match_advisor:
+            advisor_name = match_advisor.group(1).strip()
+        elif student_id and student_id in MOCK_DATABASE:
+            advisor_name = MOCK_DATABASE[student_id].get("advisor", "PGS.TS Nguyễn Văn A")
+        else:
+            advisor_name = "PGS.TS Nguyễn Văn A"
+
+        # Phân tích ý định (Intent Analysis) dựa trên ngữ cảnh câu hỏi
+        is_booking = any(k in prompt_lower for k in ["đặt lịch", "hẹn", "booking", "schedule"])
+        is_querying = any(k in prompt_lower for k in ["tra cứu", "thông tin", "kết quả", "học vụ", "gpa", "điểm", "kiểm tra"])
+
+        if is_booking and student_id:
             return {
                 "type": "tool_call",
                 "tool_name": "schedule_appointment",
-                "arguments": {"student_id": "SV2026001", "datetime_str": "14:00 15/09/2026", "advisor_name": "PGS.TS Nguyễn Văn A"},
-                "thought": "Người dùng yêu cầu đặt lịch hẹn tư vấn cho sinh viên SV2026001. Tôi sẽ gọi tool schedule_appointment."
+                "arguments": {
+                    "student_id": student_id,
+                    "datetime_str": datetime_str,
+                    "advisor_name": advisor_name
+                },
+                "thought": f"Phát hiện yêu cầu đặt lịch tư vấn cho sinh viên {student_id} vào lúc {datetime_str} với cố vấn {advisor_name}. Kích hoạt Tool schedule_appointment."
             }
-        elif "sv2026001" in prompt_lower or "tra cứu" in prompt_lower:
+        elif (is_querying or student_id) and student_id:
             return {
                 "type": "tool_call",
                 "tool_name": "academic_query",
-                "arguments": {"student_id": "SV2026001"},
-                "thought": "Người dùng muốn tra cứu thông tin học vụ của sinh viên SV2026001. Tôi sẽ gọi tool academic_query."
+                "arguments": {"student_id": student_id},
+                "thought": f"Phát hiện nhu cầu tra cứu hồ sơ học vụ cho sinh viên {student_id}. Kích hoạt Tool academic_query."
             }
         else:
             return {
                 "type": "text",
-                "content": f"[Mock Agent Response]: Xin chào! Quy chế học vụ VinUni yêu cầu sinh viên tích lũy tối thiểu 120 tín chỉ và duy trì GPA trên 2.0 để tốt nghiệp.",
-                "thought": "Câu hỏi chung về quy chế học vụ, trả lời trực tiếp không cần gọi Tool."
+                "content": "Theo quy chế học vụ cơ bản của Đại học VinUni, sinh viên cần tích lũy tối thiểu 120-130 tín chỉ (tùy theo ngành học), duy trì điểm trung bình tích lũy (GPA) tối thiểu từ 2.0/4.0 trở lên, hoàn thành đầy đủ các chứng chỉ Giáo dục Thể chất, Giáo dục Quốc phòng - An ninh và chuẩn đầu ra tiếng Anh để đủ điều kiện xét tốt nghiệp.",
+                "thought": "Câu hỏi tổng quan về quy chế học vụ chung, không yêu cầu dữ liệu cá nhân hay lịch trình động, trả lời trực tiếp từ tri thức sẵn có."
             }
 
 
